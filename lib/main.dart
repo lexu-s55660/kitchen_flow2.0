@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
+import 'package:speech_to_text/speech_to_text.dart' as stt;
 
 const String _webAppUrl =
     'https://script.google.com/macros/s/AKfycby0Vca_oiDXY42UGURAYPDXa3ZGE8wKpC0PCNjGwj3ui18XR6miRERe81G_M6GKYa8w/exec';
@@ -42,6 +43,19 @@ class RecentEntry {
   });
 }
 
+// Модель для строки калькулятора партий
+class BatchItem {
+  final TextEditingController countController = TextEditingController();
+  final TextEditingController weightController = TextEditingController();
+  final TextEditingController priceController = TextEditingController();
+
+  void dispose() {
+    countController.dispose();
+    weightController.dispose();
+    priceController.dispose();
+  }
+}
+
 class HomeScreen extends StatefulWidget {
   const HomeScreen({super.key});
 
@@ -58,6 +72,10 @@ class _HomeScreenState extends State<HomeScreen> {
   // Контроллер второго экрана (Добавление нового ингредиента)
   final TextEditingController _newIngredientController =
       TextEditingController();
+
+  // Голосовой ввод
+  late stt.SpeechToText _speech;
+  bool _isListening = false;
 
   String _ingredientValue = '';
   String? _selectedDocument;
@@ -130,7 +148,60 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
+    _speech = stt.SpeechToText();
     _fetchDirectory();
+  }
+
+  @override
+  void dispose() {
+    _amountController.dispose();
+    _totalSumController.dispose();
+    _newIngredientController.dispose();
+    super.dispose();
+  }
+
+  // Запуск/остановка распознавания речи
+  void _listenVoice() async {
+    if (!_isListening) {
+      bool available = await _speech.initialize(
+        onStatus: (status) {
+          if (status == 'done' || status == 'notListening') {
+            setState(() => _isListening = false);
+          }
+        },
+        onError: (errorNotification) {
+          setState(() => _isListening = false);
+        },
+      );
+
+      if (available) {
+        setState(() => _isListening = true);
+        _speech.listen(
+          localeId: 'ru_RU',
+          onResult: (result) {
+            setState(() {
+              final recognizedText = result.recognizedWords;
+              if (recognizedText.isNotEmpty) {
+                _ingredientController?.text = recognizedText;
+                _ingredientValue = recognizedText;
+                _autoCalculateTotalIfLavash();
+              }
+            });
+          },
+        );
+      } else {
+        if (!mounted) return;
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('Голосовой ввод недоступен или нет разрешения'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } else {
+      setState(() => _isListening = false);
+      _speech.stop();
+    }
   }
 
   // Расчет суммы для ЛАВАША по 15 руб/шт
@@ -193,6 +264,19 @@ class _HomeScreenState extends State<HomeScreen> {
       _selectedDocument == 'Перемещение в заведения' ||
       _selectedDocument == 'Перемещение Бар-Кухня/Кухня-Бар';
 
+  // Динамический список получателей
+  List<String> get _currentRecipients {
+    if (_selectedDocument == 'Перемещение Бар-Кухня/Кухня-Бар') {
+      return ['Бар', 'Кухня'];
+    }
+    if (_selectedDocument == 'Перемещение в заведения') {
+      return _recipients
+          .where((item) => item != 'Бар' && item != 'Кухня')
+          .toList();
+    }
+    return _recipients;
+  }
+
   // Динамический заголовок для получателя
   String get _recipientLabel =>
       _selectedDocument == 'Перемещение Бар-Кухня/Кухня-Бар'
@@ -212,6 +296,232 @@ class _HomeScreenState extends State<HomeScreen> {
       return total / amount;
     }
     return 0;
+  }
+
+  // Диалог калькулятора партий и фасовок
+  void _showBatchCalculator() {
+    final List<BatchItem> batches = [
+      BatchItem()..weightController.text = '1.0',
+      BatchItem()..weightController.text = '0.9',
+    ];
+
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) {
+        return StatefulBuilder(
+          builder: (context, setModalState) {
+            double totalWeight = 0;
+            double totalPrice = 0;
+
+            for (var b in batches) {
+              final count =
+                  double.tryParse(
+                    b.countController.text.replaceAll(',', '.'),
+                  ) ??
+                  0;
+              final weight =
+                  double.tryParse(
+                    b.weightController.text.replaceAll(',', '.'),
+                  ) ??
+                  0;
+              final price =
+                  double.tryParse(
+                    b.priceController.text.replaceAll(',', '.'),
+                  ) ??
+                  0;
+
+              totalWeight += count * weight;
+              totalPrice += count * price;
+            }
+
+            return Padding(
+              padding: EdgeInsets.only(
+                top: 20,
+                left: 16,
+                right: 16,
+                bottom: MediaQuery.of(context).viewInsets.bottom + 20,
+              ),
+              child: SingleChildScrollView(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                      children: [
+                        const Text(
+                          '🧮 Калькулятор партий / фасовок',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                            color: Colors.deepOrange,
+                          ),
+                        ),
+                        IconButton(
+                          icon: const Icon(Icons.close),
+                          onPressed: () => Navigator.pop(ctx),
+                        ),
+                      ],
+                    ),
+                    const Text(
+                      'Укажите количество упаковок, вес 1 шт и стоимость за штуку:',
+                      style: TextStyle(fontSize: 12, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 12),
+                    ...batches.asMap().entries.map((entry) {
+                      final index = entry.key;
+                      final item = entry.value;
+                      return Padding(
+                        padding: const EdgeInsets.only(bottom: 8.0),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              flex: 3,
+                              child: TextField(
+                                controller: item.countController,
+                                keyboardType: TextInputType.number,
+                                decoration: const InputDecoration(
+                                  labelText: 'Кол-во (шт)',
+                                  border: OutlineInputBorder(),
+                                  isDense: true,
+                                ),
+                                onChanged: (_) => setModalState(() {}),
+                              ),
+                            ),
+                            const SizedBox(width: 6),
+                            Expanded(
+                              flex: 3,
+                              child: TextField(
+                                controller: item.weightController,
+                                keyboardType: TextInputType.number,
+                                decoration: const InputDecoration(
+                                  labelText: 'Вес 1 шт (кг)',
+                                  border: OutlineInputBorder(),
+                                  isDense: true,
+                                ),
+                                onChanged: (_) => setModalState(() {}),
+                              ),
+                            ),
+                            if (_isSumRequired) ...[
+                              const SizedBox(width: 6),
+                              Expanded(
+                                flex: 3,
+                                child: TextField(
+                                  controller: item.priceController,
+                                  keyboardType: TextInputType.number,
+                                  decoration: const InputDecoration(
+                                    labelText: 'Цена 1 шт (₽)',
+                                    border: OutlineInputBorder(),
+                                    isDense: true,
+                                  ),
+                                  onChanged: (_) => setModalState(() {}),
+                                ),
+                              ),
+                            ],
+                            IconButton(
+                              icon: const Icon(
+                                Icons.remove_circle,
+                                color: Colors.redAccent,
+                              ),
+                              onPressed: batches.length > 1
+                                  ? () {
+                                      setModalState(() {
+                                        batches.removeAt(index);
+                                      });
+                                    }
+                                  : null,
+                            ),
+                          ],
+                        ),
+                      );
+                    }),
+                    TextButton.icon(
+                      onPressed: () {
+                        setModalState(() {
+                          batches.add(BatchItem());
+                        });
+                      },
+                      icon: const Icon(Icons.add),
+                      label: const Text('Добавить строку фасовки'),
+                    ),
+                    const Divider(),
+                    Container(
+                      padding: const EdgeInsets.all(12),
+                      decoration: BoxDecoration(
+                        color: Colors.grey.shade100,
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                      child: Column(
+                        children: [
+                          Row(
+                            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                            children: [
+                              const Text('Итоговый объем/вес:'),
+                              Text(
+                                '${totalWeight.toStringAsFixed(3).replaceAll(RegExp(r"([.]*0)(?!.*\d)"), "")} кг/ед',
+                                style: const TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                            ],
+                          ),
+                          if (_isSumRequired) ...[
+                            const SizedBox(height: 4),
+                            Row(
+                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                              children: [
+                                const Text('Итоговая сумма:'),
+                                Text(
+                                  '${totalPrice.toStringAsFixed(2)} ₽',
+                                  style: const TextStyle(
+                                    fontWeight: FontWeight.bold,
+                                    color: Colors.green,
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 12),
+                    ElevatedButton(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.deepOrange,
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                      ),
+                      onPressed: () {
+                        setState(() {
+                          if (totalWeight > 0) {
+                            _amountController.text = totalWeight
+                                .toStringAsFixed(3)
+                                .replaceAll(RegExp(r"([.]*0)(?!.*\d)"), "");
+                          }
+                          if (_isSumRequired && totalPrice > 0) {
+                            _totalSumController.text = totalPrice
+                                .toStringAsFixed(2);
+                          }
+                          _autoCalculateTotalIfLavash();
+                        });
+                        Navigator.pop(ctx);
+                      },
+                      child: const Text(
+                        'ПРИМЕНИТЬ В ФОРМУ',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      },
+    );
   }
 
   // Метод добавления нового ингредиента в Справочник
@@ -460,6 +770,14 @@ class _HomeScreenState extends State<HomeScreen> {
                             onChanged: (val) {
                               setState(() {
                                 _selectedDocument = val;
+                                if (_isTransfer &&
+                                    !_currentRecipients.contains(
+                                      _selectedRecipient,
+                                    )) {
+                                  _selectedRecipient = null;
+                                } else if (!_isTransfer) {
+                                  _selectedRecipient = null;
+                                }
                               });
                             },
                           ),
@@ -473,7 +791,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 prefixIcon: const Icon(Icons.store),
                                 border: const OutlineInputBorder(),
                               ),
-                              items: _recipients.map((rec) {
+                              items: _currentRecipients.map((rec) {
                                 return DropdownMenuItem(
                                   value: rec,
                                   child: Text(
@@ -536,8 +854,11 @@ class _HomeScreenState extends State<HomeScreen> {
                                         Icons.restaurant_menu,
                                       ),
                                       border: const OutlineInputBorder(),
-                                      suffixIcon: _isLoadingDirectory
-                                          ? const SizedBox(
+                                      suffixIcon: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          if (_isLoadingDirectory)
+                                            const SizedBox(
                                               width: 16,
                                               height: 16,
                                               child: Padding(
@@ -547,25 +868,73 @@ class _HomeScreenState extends State<HomeScreen> {
                                                       strokeWidth: 2,
                                                     ),
                                               ),
-                                            )
-                                          : null,
+                                            ),
+                                          IconButton(
+                                            icon: Icon(
+                                              _isListening
+                                                  ? Icons.mic
+                                                  : Icons.mic_none,
+                                              color: _isListening
+                                                  ? Colors.red
+                                                  : Colors.deepOrange,
+                                            ),
+                                            tooltip: 'Голосовой ввод',
+                                            onPressed: _listenVoice,
+                                          ),
+                                        ],
+                                      ),
                                     ),
                                   );
                                 },
                           ),
                           const SizedBox(height: 12),
-                          TextField(
-                            controller: _amountController,
-                            keyboardType: TextInputType.number,
-                            onChanged: (_) {
-                              _autoCalculateTotalIfLavash();
-                              setState(() {});
-                            },
-                            decoration: const InputDecoration(
-                              labelText: 'Количество *',
-                              prefixIcon: Icon(Icons.scale),
-                              border: OutlineInputBorder(),
-                            ),
+                          Row(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                              Expanded(
+                                child: TextField(
+                                  controller: _amountController,
+                                  keyboardType: TextInputType.number,
+                                  onChanged: (_) {
+                                    _autoCalculateTotalIfLavash();
+                                    setState(() {});
+                                  },
+                                  decoration: const InputDecoration(
+                                    labelText: 'Количество *',
+                                    prefixIcon: Icon(Icons.scale),
+                                    border: OutlineInputBorder(),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              SizedBox(
+                                height: 56,
+                                child: ElevatedButton(
+                                  style: ElevatedButton.styleFrom(
+                                    backgroundColor: Colors.deepOrange.shade50,
+                                    foregroundColor: Colors.deepOrange,
+                                    elevation: 0,
+                                    side: const BorderSide(
+                                      color: Colors.deepOrange,
+                                    ),
+                                    shape: RoundedRectangleBorder(
+                                      borderRadius: BorderRadius.circular(4),
+                                    ),
+                                  ),
+                                  onPressed: _showBatchCalculator,
+                                  child: const Column(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      Icon(Icons.calculate, size: 20),
+                                      Text(
+                                        'Партии',
+                                        style: TextStyle(fontSize: 11),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ),
+                            ],
                           ),
                           const SizedBox(height: 8),
                           Row(
