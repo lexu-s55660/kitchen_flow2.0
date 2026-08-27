@@ -1,10 +1,11 @@
 import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
-import 'package:speech_to_text/speech_to_text.dart' as stt;
+import 'package:shared_preferences/shared_preferences.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 const String _webAppUrl =
-    'https://script.google.com/macros/s/AKfycby0Vca_oiDXY42UGURAYPDXa3ZGE8wKpC0PCNjGwj3ui18XR6miRERe81G_M6GKYa8w/exec';
+    'https://script.google.com/macros/s/AKfycbx_wOa6I1STNOAypOmRWsOQo8RziiAQYDizVFC-csMUW1JDwCh-Eg1tpFxpSB5iB5ob/exec';
 
 void main() {
   runApp(const KitchenFlowApp());
@@ -41,9 +42,24 @@ class RecentEntry {
     required this.amount,
     required this.total,
   });
+
+  Map<String, dynamic> toJson() => {
+    'document': document,
+    'recipient': recipient,
+    'ingredient': ingredient,
+    'amount': amount,
+    'total': total,
+  };
+
+  factory RecentEntry.fromJson(Map<String, dynamic> json) => RecentEntry(
+    document: json['document'] ?? '',
+    recipient: json['recipient'] ?? '',
+    ingredient: json['ingredient'] ?? '',
+    amount: json['amount'] ?? '',
+    total: json['total'] ?? '',
+  );
 }
 
-// Модель для строки калькулятора партий
 class BatchItem {
   final TextEditingController countController = TextEditingController();
   final TextEditingController weightController = TextEditingController();
@@ -64,18 +80,11 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
-  // Контроллеры первого экрана
   final TextEditingController _amountController = TextEditingController();
   final TextEditingController _totalSumController = TextEditingController();
   TextEditingController? _ingredientController;
-
-  // Контроллер второго экрана (Добавление нового ингредиента)
   final TextEditingController _newIngredientController =
       TextEditingController();
-
-  // Голосовой ввод
-  late stt.SpeechToText _speech;
-  bool _isListening = false;
 
   String _ingredientValue = '';
   String? _selectedDocument;
@@ -83,8 +92,10 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isLoading = false;
   bool _isAddingIngredient = false;
   bool _isLoadingDirectory = true;
+  bool _isSyncing = false;
 
   final List<RecentEntry> _recentHistory = [];
+  final List<RecentEntry> _offlineQueue = [];
   List<String> _directoryList = [];
 
   final List<String> _documents = [
@@ -148,7 +159,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    _speech = stt.SpeechToText();
+    _loadOfflineData();
     _fetchDirectory();
   }
 
@@ -160,51 +171,85 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
-  // Запуск/остановка распознавания речи
-  void _listenVoice() async {
-    if (!_isListening) {
-      bool available = await _speech.initialize(
-        onStatus: (status) {
-          if (status == 'done' || status == 'notListening') {
-            setState(() => _isListening = false);
-          }
-        },
-        onError: (errorNotification) {
-          setState(() => _isListening = false);
-        },
-      );
+  Future<void> _loadOfflineData() async {
+    final prefs = await SharedPreferences.getInstance();
+    final queueRaw = prefs.getStringList('offline_queue') ?? [];
+    final dirRaw = prefs.getStringList('cached_directory') ?? [];
 
-      if (available) {
-        setState(() => _isListening = true);
-        _speech.listen(
-          localeId: 'ru_RU',
-          onResult: (result) {
-            setState(() {
-              final recognizedText = result.recognizedWords;
-              if (recognizedText.isNotEmpty) {
-                _ingredientController?.text = recognizedText;
-                _ingredientValue = recognizedText;
-                _autoCalculateTotalIfLavash();
-              }
-            });
-          },
-        );
-      } else {
-        if (!mounted) return;
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-            content: Text('Голосовой ввод недоступен или нет разрешения'),
-            backgroundColor: Colors.red,
-          ),
-        );
+    setState(() {
+      _offlineQueue.clear();
+      for (var item in queueRaw) {
+        _offlineQueue.add(RecentEntry.fromJson(jsonDecode(item)));
       }
-    } else {
-      setState(() => _isListening = false);
-      _speech.stop();
+      if (dirRaw.isNotEmpty && _directoryList.isEmpty) {
+        _directoryList = dirRaw;
+        _isLoadingDirectory = false;
+      }
+    });
+
+    if (_offlineQueue.isNotEmpty) {
+      _syncOfflineQueue();
     }
   }
 
-  // Расчет суммы для ЛАВАША по 15 руб/шт
+  Future<void> _saveOfflineQueue() async {
+    final prefs = await SharedPreferences.getInstance();
+    final rawList = _offlineQueue.map((e) => jsonEncode(e.toJson())).toList();
+    await prefs.setStringList('offline_queue', rawList);
+  }
+
+  Future<void> _syncOfflineQueue() async {
+    if (_offlineQueue.isEmpty || _isSyncing) return;
+    setState(() => _isSyncing = true);
+    final List<RecentEntry> queueToProcess = List.from(_offlineQueue);
+    int successCount = 0;
+
+    for (var entry in queueToProcess) {
+      try {
+        final payload = jsonEncode({
+          'document': entry.document,
+          'recipient': entry.recipient,
+          'ingredient': entry.ingredient,
+          'amount': entry.amount,
+          'unit': '',
+          'total': entry.total,
+        });
+
+        final response = await http
+            .post(
+              Uri.parse(_webAppUrl),
+              headers: {'Content-Type': 'text/plain;charset=utf-8'},
+              body: payload,
+            )
+            .timeout(const Duration(seconds: 10));
+
+        if (response.statusCode < 400) {
+          _offlineQueue.remove(entry);
+          successCount++;
+        }
+      } catch (e) {
+        break;
+      }
+    }
+
+    await _saveOfflineQueue();
+
+    if (mounted) {
+      setState(() {
+        _isSyncing = false;
+      });
+      if (successCount > 0) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('✅ Синхронизировано записей: $successCount'),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      }
+    }
+  }
+
   void _autoCalculateTotalIfLavash() {
     final ingName = _ingredientValue.trim().toUpperCase();
     if (ingName.contains('ЛАВАШ')) {
@@ -219,7 +264,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   Future<void> _fetchDirectory() async {
     try {
-      final response = await http.get(Uri.parse(_webAppUrl));
+      final response = await http
+          .get(Uri.parse(_webAppUrl))
+          .timeout(const Duration(seconds: 8));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         final List<dynamic> ingredients = data['ingredients'] ?? [];
@@ -227,20 +274,22 @@ class _HomeScreenState extends State<HomeScreen> {
 
         final Set<String> combined = {};
         for (var item in ingredients) {
-          if (item != null && item.toString().isNotEmpty) {
+          if (item != null && item.toString().isNotEmpty)
             combined.add(item.toString().trim());
-          }
         }
         for (var item in dishes) {
-          if (item != null && item.toString().isNotEmpty) {
+          if (item != null && item.toString().isNotEmpty)
             combined.add(item.toString().trim());
-          }
         }
 
+        final list = combined.toList();
         setState(() {
-          _directoryList = combined.toList();
+          _directoryList = list;
           _isLoadingDirectory = false;
         });
+
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setStringList('cached_directory', list);
       }
     } catch (_) {
       setState(() {
@@ -259,30 +308,23 @@ class _HomeScreenState extends State<HomeScreen> {
     return buffer.toString();
   }
 
-  // Проверка типа перемещения
   bool get _isTransfer =>
       _selectedDocument == 'Перемещение в заведения' ||
       _selectedDocument == 'Перемещение Бар-Кухня/Кухня-Бар';
-
-  // Динамический список получателей
   List<String> get _currentRecipients {
-    if (_selectedDocument == 'Перемещение Бар-Кухня/Кухня-Бар') {
+    if (_selectedDocument == 'Перемещение Бар-Кухня/Кухня-Бар')
       return ['Бар', 'Кухня'];
-    }
-    if (_selectedDocument == 'Перемещение в заведения') {
+    if (_selectedDocument == 'Перемещение в заведения')
       return _recipients
           .where((item) => item != 'Бар' && item != 'Кухня')
           .toList();
-    }
     return _recipients;
   }
 
-  // Динамический заголовок для получателя
   String get _recipientLabel =>
       _selectedDocument == 'Перемещение Бар-Кухня/Кухня-Бар'
       ? 'Кому (Бар-Кухня/Кухня-Бар) *'
       : 'Кому (Цех/Склад) *';
-
   bool get _isSumRequired =>
       _selectedDocument == 'Накладная базар' ||
       _selectedDocument == 'Накладная метро';
@@ -292,13 +334,10 @@ class _HomeScreenState extends State<HomeScreen> {
         double.tryParse(_amountController.text.replaceAll(',', '.')) ?? 0;
     final double total =
         double.tryParse(_totalSumController.text.replaceAll(',', '.')) ?? 0;
-    if (amount > 0 && total > 0) {
-      return total / amount;
-    }
+    if (amount > 0 && total > 0) return total / amount;
     return 0;
   }
 
-  // Диалог калькулятора партий и фасовок
   void _showBatchCalculator() {
     final List<BatchItem> batches = [
       BatchItem()..weightController.text = '1.0',
@@ -333,7 +372,6 @@ class _HomeScreenState extends State<HomeScreen> {
                     b.priceController.text.replaceAll(',', '.'),
                   ) ??
                   0;
-
               totalWeight += count * weight;
               totalPrice += count * price;
             }
@@ -496,15 +534,13 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                       onPressed: () {
                         setState(() {
-                          if (totalWeight > 0) {
+                          if (totalWeight > 0)
                             _amountController.text = totalWeight
                                 .toStringAsFixed(3)
                                 .replaceAll(RegExp(r"([.]*0)(?!.*\d)"), "");
-                          }
-                          if (_isSumRequired && totalPrice > 0) {
+                          if (_isSumRequired && totalPrice > 0)
                             _totalSumController.text = totalPrice
                                 .toStringAsFixed(2);
-                          }
                           _autoCalculateTotalIfLavash();
                         });
                         Navigator.pop(ctx);
@@ -524,7 +560,6 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // Метод добавления нового ингредиента в Справочник
   Future<void> _addNewIngredient() async {
     final newIngName = _newIngredientController.text.trim();
     if (newIngName.isEmpty) {
@@ -546,17 +581,20 @@ class _HomeScreenState extends State<HomeScreen> {
         'action': 'add_ingredient',
         'ingredient': newIngName,
       });
-
-      await http.post(
-        Uri.parse(_webAppUrl),
-        headers: {'Content-Type': 'text/plain;charset=utf-8'},
-        body: payload,
-      );
+      await http
+          .post(
+            Uri.parse(_webAppUrl),
+            headers: {'Content-Type': 'text/plain;charset=utf-8'},
+            body: payload,
+          )
+          .timeout(const Duration(seconds: 10));
 
       if (!mounted) return;
 
       if (!_directoryList.contains(newIngName)) {
         _directoryList.add(newIngName);
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setStringList('cached_directory', _directoryList);
       }
 
       ScaffoldMessenger.of(context).showSnackBar(
@@ -568,14 +606,13 @@ class _HomeScreenState extends State<HomeScreen> {
           duration: const Duration(seconds: 3),
         ),
       );
-
       _newIngredientController.clear();
       FocusScope.of(context).unfocus();
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('❌ Ошибка добавления: $e'),
+          content: Text('❌ Ошибка добавления (нет сети): $e'),
           backgroundColor: Colors.red,
         ),
       );
@@ -611,61 +648,67 @@ class _HomeScreenState extends State<HomeScreen> {
       _isLoading = true;
     });
 
+    final newEntry = RecentEntry(
+      document: _selectedDocument!,
+      recipient: _isTransfer ? _selectedRecipient! : '',
+      ingredient: ingredientText,
+      amount: amountText,
+      total: _isSumRequired ? totalSumText : '',
+    );
+
     try {
       final payload = jsonEncode({
-        'document': _selectedDocument,
-        'recipient': _isTransfer ? _selectedRecipient : '',
-        'ingredient': ingredientText,
-        'amount': amountText,
+        'document': newEntry.document,
+        'recipient': newEntry.recipient,
+        'ingredient': newEntry.ingredient,
+        'amount': newEntry.amount,
         'unit': '',
-        'total': _isSumRequired ? totalSumText : '',
+        'total': newEntry.total,
       });
-
-      await http.post(
-        Uri.parse(_webAppUrl),
-        headers: {'Content-Type': 'text/plain;charset=utf-8'},
-        body: payload,
-      );
+      final response = await http
+          .post(
+            Uri.parse(_webAppUrl),
+            headers: {'Content-Type': 'text/plain;charset=utf-8'},
+            body: payload,
+          )
+          .timeout(const Duration(seconds: 6));
 
       if (!mounted) return;
 
-      _recentHistory.insert(
-        0,
-        RecentEntry(
-          document: _selectedDocument!,
-          recipient: _selectedRecipient ?? '',
-          ingredient: ingredientText,
-          amount: amountText,
-          total: _isSumRequired ? totalSumText : '',
-        ),
-      );
-
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('✅ Добавлено: $ingredientText ($amountText)'),
-          backgroundColor: Colors.green,
-          duration: const Duration(seconds: 2),
-        ),
-      );
-
-      setState(() {
-        _amountController.clear();
-        _totalSumController.clear();
-        _ingredientValue = '';
-        _ingredientController?.clear();
-      });
-    } catch (e) {
+      if (response.statusCode < 400) {
+        _recentHistory.insert(0, newEntry);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('✅ Отправлено: $ingredientText ($amountText)'),
+            backgroundColor: Colors.green,
+            duration: const Duration(seconds: 2),
+          ),
+        );
+      } else {
+        throw Exception('Server error: ${response.statusCode}');
+      }
+    } catch (_) {
       if (!mounted) return;
+      _offlineQueue.add(newEntry);
+      _recentHistory.insert(0, newEntry);
+      await _saveOfflineQueue();
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(
-          content: Text('❌ Ошибка отправки: $e'),
-          backgroundColor: Colors.red,
+          content: Text(
+            '📦 Нет связи. Сохранено оффлайн: $ingredientText ($amountText)',
+          ),
+          backgroundColor: Colors.orange.shade800,
+          duration: const Duration(seconds: 3),
         ),
       );
     } finally {
       if (mounted) {
         setState(() {
           _isLoading = false;
+          _amountController.clear();
+          _totalSumController.clear();
+          _ingredientValue = '';
+          _ingredientController?.clear();
         });
       }
     }
@@ -675,7 +718,6 @@ class _HomeScreenState extends State<HomeScreen> {
     setState(() {
       _isLoading = true;
     });
-
     try {
       final payload = jsonEncode({
         'action': 'delete_last',
@@ -685,7 +727,6 @@ class _HomeScreenState extends State<HomeScreen> {
         'amount': entry.amount,
         'total': entry.total,
       });
-
       await http.post(
         Uri.parse(_webAppUrl),
         headers: {'Content-Type': 'text/plain;charset=utf-8'},
@@ -696,12 +737,13 @@ class _HomeScreenState extends State<HomeScreen> {
       if (mounted) {
         setState(() {
           _recentHistory.remove(entry);
+          _offlineQueue.remove(entry);
           _isLoading = false;
         });
-
+        _saveOfflineQueue();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
-            content: Text('🗑️ Удалено из таблицы: ${entry.ingredient}'),
+            content: Text('🗑️ Удалено: ${entry.ingredient}'),
             backgroundColor: Colors.redAccent,
             duration: const Duration(seconds: 2),
           ),
@@ -710,10 +752,212 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
+  // ================= АВТОМАТИЧЕСКАЯ ГЕНЕРАЦИЯ ГРАФИКА =================
+  Color _getChefColor(String? name) {
+    if (name == null) return Colors.grey.shade300;
+    switch (name) {
+      case 'Алексей':
+        return Colors.red;
+      case 'Денис':
+        return Colors.orange;
+      case 'Данил':
+        return Colors.green.shade800; // Темно-зеленый
+      case 'Газиз':
+        return Colors.black;
+      case 'Гена':
+        return Colors.blue.shade900; // Темно-синий
+      default:
+        return Colors.black87;
+    }
+  }
+
+  Widget _buildScheduleMonthCard(DateTime monthDate) {
+    final int daysInMonth = DateTime(
+      monthDate.year,
+      monthDate.month + 1,
+      0,
+    ).day;
+    const List<String> monthNames = [
+      '',
+      'Январь',
+      'Февраль',
+      'Март',
+      'Апрель',
+      'Май',
+      'Июнь',
+      'Июль',
+      'Август',
+      'Сентябрь',
+      'Октябрь',
+      'Ноябрь',
+      'Декабрь',
+    ];
+    String monthTitle = '${monthNames[monthDate.month]} ${monthDate.year}';
+
+    // Якорь — 1 августа 2026. Именно отсюда отсчитывается 12-дневный цикл
+    final DateTime anchor = DateTime.utc(2026, 8, 1);
+
+    // Цикл дежурств (2 через 2, повторяется каждые 12 дней для имен)
+    final List<Map<String, String?>> cycle = [
+      {'alexei': null, 'denis': 'Денис'}, // Индекс 0 (1 авг)
+      {'alexei': null, 'denis': 'Газиз'}, // Индекс 1
+      {'alexei': 'Данил', 'denis': null}, // Индекс 2 (3 авг)
+      {'alexei': 'Денис', 'denis': null}, // Индекс 3
+      {'alexei': null, 'denis': 'Гена'}, // Индекс 4
+      {'alexei': null, 'denis': 'Газиз'}, // Индекс 5
+      {'alexei': 'Данил', 'denis': null}, // Индекс 6
+      {'alexei': 'Алексей', 'denis': null}, // Индекс 7
+      {'alexei': null, 'denis': 'Гена'}, // Индекс 8
+      {'alexei': null, 'denis': 'Денис'}, // Индекс 9
+      {'alexei': 'Алексей', 'denis': null}, // Индекс 10
+      {'alexei': 'Денис', 'denis': null}, // Индекс 11
+    ];
+
+    List<Widget> rows = [];
+
+    // Шапка таблицы
+    rows.add(
+      Padding(
+        padding: const EdgeInsets.only(bottom: 8.0),
+        child: Row(
+          children: const [
+            SizedBox(
+              width: 40,
+              child: Text(
+                'Дата',
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 12,
+                  color: Colors.grey,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ),
+            Expanded(
+              child: Text(
+                'СМЕНА Алексея',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                  color: Colors.black87,
+                ),
+              ),
+            ),
+            Expanded(
+              child: Text(
+                'СМЕНА Дениса',
+                textAlign: TextAlign.center,
+                style: TextStyle(
+                  fontWeight: FontWeight.bold,
+                  fontSize: 13,
+                  color: Colors.black87,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+    rows.add(const Divider(height: 1, thickness: 1));
+
+    // Заполнение дней месяца
+    for (int i = 1; i <= daysInMonth; i++) {
+      DateTime currentDay = DateTime.utc(monthDate.year, monthDate.month, i);
+      int difference = currentDay.difference(anchor).inDays;
+      int cycleIndex = difference % 12;
+      if (cycleIndex < 0) cycleIndex += 12; // Защита от прошлых дат
+
+      var shift = cycle[cycleIndex];
+      bool isWeekend = currentDay.weekday == 6 || currentDay.weekday == 7;
+
+      rows.add(
+        Container(
+          color: i % 2 == 0 ? Colors.grey.shade50 : Colors.white,
+          padding: const EdgeInsets.symmetric(vertical: 10.0),
+          child: Row(
+            children: [
+              SizedBox(
+                width: 40,
+                child: Text(
+                  i.toString(),
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: isWeekend
+                        ? Colors.red.shade400
+                        : Colors.deepOrange, // Выходные красным
+                  ),
+                  textAlign: TextAlign.center,
+                ),
+              ),
+              Expanded(
+                child: Text(
+                  shift['alexei'] ?? '-',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: shift['alexei'] != null
+                        ? FontWeight.bold
+                        : FontWeight.normal,
+                    color: _getChefColor(shift['alexei']),
+                  ),
+                ),
+              ),
+              Expanded(
+                child: Text(
+                  shift['denis'] ?? '-',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(
+                    fontSize: 15,
+                    fontWeight: shift['denis'] != null
+                        ? FontWeight.bold
+                        : FontWeight.normal,
+                    color: _getChefColor(shift['denis']),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    return Card(
+      elevation: 2,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text(
+              monthTitle.toUpperCase(),
+              style: const TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+                color: Colors.deepOrange,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            const SizedBox(height: 16),
+            ...rows,
+          ],
+        ),
+      ),
+    );
+  }
+  // ===================================================================
+
   @override
   Widget build(BuildContext context) {
+    // Получаем текущую дату для графика
+    DateTime now = DateTime.now();
+    DateTime currentMonth = DateTime(now.year, now.month, 1);
+    DateTime nextMonth = DateTime(now.year, now.month + 1, 1);
+
     return DefaultTabController(
-      length: 3,
+      length: 4,
       child: Scaffold(
         appBar: AppBar(
           title: const Text(
@@ -724,23 +968,75 @@ class _HomeScreenState extends State<HomeScreen> {
           backgroundColor: Colors.deepOrange,
           elevation: 0,
           bottom: const TabBar(
+            isScrollable: true,
             indicatorColor: Colors.white,
             indicatorWeight: 3,
             tabs: [
               Tab(icon: Icon(Icons.edit_note), text: 'Ввод данных'),
               Tab(icon: Icon(Icons.add_box), text: 'Ингредиент'),
+              Tab(icon: Icon(Icons.restaurant), text: 'Питание'),
               Tab(icon: Icon(Icons.info_outline), text: 'О программе'),
             ],
           ),
         ),
         body: TabBarView(
           children: [
-            // ================= ВКЛАДКА 1: Ввод данных =================
+            // ВКЛАДКА 1: Ввод данных
             SingleChildScrollView(
               padding: const EdgeInsets.all(16.0),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
+                  if (_offlineQueue.isNotEmpty)
+                    Container(
+                      margin: const EdgeInsets.only(bottom: 12),
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 14,
+                        vertical: 10,
+                      ),
+                      decoration: BoxDecoration(
+                        color: Colors.amber.shade100,
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: Colors.amber.shade600),
+                      ),
+                      child: Row(
+                        children: [
+                          Icon(
+                            Icons.cloud_off,
+                            color: Colors.amber.shade900,
+                            size: 24,
+                          ),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              'В памяти: ${_offlineQueue.length} несинхр. записей',
+                              style: TextStyle(
+                                color: Colors.amber.shade900,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                              ),
+                            ),
+                          ),
+                          ElevatedButton(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.amber.shade800,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 6,
+                              ),
+                              minimumSize: Size.zero,
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                            ),
+                            onPressed: _isSyncing ? null : _syncOfflineQueue,
+                            child: Text(
+                              _isSyncing ? '...' : 'Отправить',
+                              style: const TextStyle(fontSize: 12),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
                   Card(
                     elevation: 2,
                     shape: RoundedRectangleBorder(
@@ -758,26 +1054,27 @@ class _HomeScreenState extends State<HomeScreen> {
                               prefixIcon: Icon(Icons.description),
                               border: OutlineInputBorder(),
                             ),
-                            items: _documents.map((doc) {
-                              return DropdownMenuItem(
-                                value: doc,
-                                child: Text(
-                                  doc,
-                                  overflow: TextOverflow.ellipsis,
-                                ),
-                              );
-                            }).toList(),
+                            items: _documents
+                                .map(
+                                  (doc) => DropdownMenuItem(
+                                    value: doc,
+                                    child: Text(
+                                      doc,
+                                      overflow: TextOverflow.ellipsis,
+                                    ),
+                                  ),
+                                )
+                                .toList(),
                             onChanged: (val) {
                               setState(() {
                                 _selectedDocument = val;
                                 if (_isTransfer &&
                                     !_currentRecipients.contains(
                                       _selectedRecipient,
-                                    )) {
+                                    ))
                                   _selectedRecipient = null;
-                                } else if (!_isTransfer) {
+                                else if (!_isTransfer)
                                   _selectedRecipient = null;
-                                }
                               });
                             },
                           ),
@@ -791,20 +1088,19 @@ class _HomeScreenState extends State<HomeScreen> {
                                 prefixIcon: const Icon(Icons.store),
                                 border: const OutlineInputBorder(),
                               ),
-                              items: _currentRecipients.map((rec) {
-                                return DropdownMenuItem(
-                                  value: rec,
-                                  child: Text(
-                                    rec,
-                                    overflow: TextOverflow.ellipsis,
-                                  ),
-                                );
-                              }).toList(),
-                              onChanged: (val) {
-                                setState(() {
-                                  _selectedRecipient = val;
-                                });
-                              },
+                              items: _currentRecipients
+                                  .map(
+                                    (rec) => DropdownMenuItem(
+                                      value: rec,
+                                      child: Text(
+                                        rec,
+                                        overflow: TextOverflow.ellipsis,
+                                      ),
+                                    ),
+                                  )
+                                  .toList(),
+                              onChanged: (val) =>
+                                  setState(() => _selectedRecipient = val),
                             ),
                           ],
                           const SizedBox(height: 12),
@@ -812,12 +1108,9 @@ class _HomeScreenState extends State<HomeScreen> {
                             optionsBuilder:
                                 (TextEditingValue textEditingValue) {
                                   final query = textEditingValue.text.trim();
-                                  if (query.isEmpty) {
+                                  if (query.isEmpty)
                                     return const Iterable<String>.empty();
-                                  }
-
                                   final ruQuery = _convertEnToRu(query);
-
                                   return _directoryList.where((String option) {
                                     final lowerOption = option.toLowerCase();
                                     return lowerOption.contains(
@@ -854,11 +1147,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                         Icons.restaurant_menu,
                                       ),
                                       border: const OutlineInputBorder(),
-                                      suffixIcon: Row(
-                                        mainAxisSize: MainAxisSize.min,
-                                        children: [
-                                          if (_isLoadingDirectory)
-                                            const SizedBox(
+                                      suffixIcon: _isLoadingDirectory
+                                          ? const SizedBox(
                                               width: 16,
                                               height: 16,
                                               child: Padding(
@@ -868,21 +1158,8 @@ class _HomeScreenState extends State<HomeScreen> {
                                                       strokeWidth: 2,
                                                     ),
                                               ),
-                                            ),
-                                          IconButton(
-                                            icon: Icon(
-                                              _isListening
-                                                  ? Icons.mic
-                                                  : Icons.mic_none,
-                                              color: _isListening
-                                                  ? Colors.red
-                                                  : Colors.deepOrange,
-                                            ),
-                                            tooltip: 'Голосовой ввод',
-                                            onPressed: _listenVoice,
-                                          ),
-                                        ],
-                                      ),
+                                            )
+                                          : null,
                                     ),
                                   );
                                 },
@@ -1058,9 +1335,22 @@ class _HomeScreenState extends State<HomeScreen> {
                       itemCount: _recentHistory.length,
                       itemBuilder: (context, index) {
                         final entry = _recentHistory[index];
+                        final isOffline = _offlineQueue.contains(entry);
                         return Card(
                           margin: const EdgeInsets.only(bottom: 8),
                           child: ListTile(
+                            leading: isOffline
+                                ? const Tooltip(
+                                    message: 'Сохранено в памяти устройства',
+                                    child: Icon(
+                                      Icons.cloud_off,
+                                      color: Colors.orange,
+                                    ),
+                                  )
+                                : const Icon(
+                                    Icons.cloud_done,
+                                    color: Colors.green,
+                                  ),
                             title: Text(
                               entry.ingredient.toUpperCase(),
                               style: const TextStyle(
@@ -1084,69 +1374,174 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
 
-            // ================= ВКЛАДКА 2: Добавить ингредиент =================
+            // ВКЛАДКА 2: Добавить ингредиент (со ссылкой на таблицу месяца)
             SingleChildScrollView(
               padding: const EdgeInsets.all(16.0),
-              child: Card(
-                elevation: 2,
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.stretch,
-                    children: [
-                      const Text(
-                        'Пополнение справочника',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
-                          color: Colors.deepOrange,
-                        ),
-                      ),
-                      const SizedBox(height: 8),
-                      const Text(
-                        'Новый ингредиент автоматически запишется в столбец A листа "Справочник" и сразу появится во всплывающем списке.',
-                        style: TextStyle(color: Colors.grey, fontSize: 13),
-                      ),
-                      const SizedBox(height: 16),
-                      TextField(
-                        controller: _newIngredientController,
-                        decoration: const InputDecoration(
-                          labelText: 'Наименование нового ингредиента *',
-                          prefixIcon: Icon(Icons.post_add),
-                          border: OutlineInputBorder(),
-                        ),
-                      ),
-                      const SizedBox(height: 20),
-                      SizedBox(
-                        height: 48,
-                        child: ElevatedButton.icon(
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: Colors.deepOrange,
-                            shape: RoundedRectangleBorder(
-                              borderRadius: BorderRadius.circular(8),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  // --- ОКОШКО С ССЫЛКОЙ НА ГУГЛ ТАБЛИЦУ ТЕКУЩЕГО МЕСЯЦА ---
+                  Card(
+                    elevation: 2,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    color: Colors.deepOrange.shade50,
+                    child: Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          Row(
+                            children: [
+                              Icon(
+                                Icons.table_chart,
+                                color: Colors.deepOrange.shade700,
+                              ),
+                              const SizedBox(width: 8),
+                              const Text(
+                                'Таблица учета текущего месяца',
+                                style: TextStyle(
+                                  fontSize: 16,
+                                  fontWeight: FontWeight.bold,
+                                  color: Colors.deepOrange,
+                                ),
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            'Здесь вы можете открыть актуальную Google Таблицу текущего месяца для проверки данных:',
+                            style: TextStyle(
+                              fontSize: 13,
+                              color: Colors.black87,
                             ),
                           ),
-                          onPressed: _isAddingIngredient
-                              ? null
-                              : _addNewIngredient,
-                          icon: const Icon(Icons.add_circle_outline),
-                          label: Text(
-                            _isAddingIngredient
-                                ? 'СОХРАНЕНИЕ...'
-                                : 'ДОБАВИТЬ В СПРАВОЧНИК',
+                          const SizedBox(height: 12),
+                          ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.deepOrange,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                            ),
+                            onPressed: () async {
+                              final Uri sheetUri = Uri.parse(
+                                'https://docs.google.com/spreadsheets/d/1BBdDtZGnEitK8_Wu8njsLry0d3eq6QSVn87D1vjePqM/edit',
+                              );
+                              try {
+                                bool launched = await launchUrl(
+                                  sheetUri,
+                                  mode: LaunchMode.externalApplication,
+                                );
+                                if (!launched) {
+                                  await launchUrl(
+                                    sheetUri,
+                                    mode: LaunchMode.platformDefault,
+                                  );
+                                }
+                              } catch (e) {
+                                if (context.mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    SnackBar(
+                                      content: Text(
+                                        'Не удалось открыть ссылку: $e',
+                                      ),
+                                      backgroundColor: Colors.red,
+                                    ),
+                                  );
+                                }
+                              }
+                            },
+                            icon: const Icon(Icons.open_in_new, size: 18),
+                            label: const Text(
+                              'ОТКРЫТЬ ТАБЛИЦУ ТЕКУЩЕГО МЕСЯЦА',
+                              style: TextStyle(
+                                fontWeight: FontWeight.bold,
+                                fontSize: 13,
+                              ),
+                            ),
                           ),
-                        ),
+                        ],
                       ),
-                    ],
+                    ),
                   ),
-                ),
+                  const SizedBox(height: 16),
+                  // ----------------------------------------------------
+
+                  Card(
+                    elevation: 2,
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                    ),
+                    child: Padding(
+                      padding: const EdgeInsets.all(16.0),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.stretch,
+                        children: [
+                          const Text(
+                            'Пополнение справочника',
+                            style: TextStyle(
+                              fontSize: 18,
+                              fontWeight: FontWeight.bold,
+                              color: Colors.deepOrange,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
+                          const Text(
+                            'Новый ингредиент автоматически запишется в столбец A листа "Справочник" и сразу появится во всплывающем списке.',
+                            style: TextStyle(color: Colors.grey, fontSize: 13),
+                          ),
+                          const SizedBox(height: 16),
+                          TextField(
+                            controller: _newIngredientController,
+                            decoration: const InputDecoration(
+                              labelText: 'Наименование нового ингредиента *',
+                              prefixIcon: Icon(Icons.post_add),
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                          const SizedBox(height: 20),
+                          SizedBox(
+                            height: 48,
+                            child: ElevatedButton.icon(
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: Colors.deepOrange,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
+                              ),
+                              onPressed: _isAddingIngredient
+                                  ? null
+                                  : _addNewIngredient,
+                              icon: const Icon(Icons.add_circle_outline),
+                              label: Text(
+                                _isAddingIngredient
+                                    ? 'СОХРАНЕНИЕ...'
+                                    : 'ДОБАВИТЬ В СПРАВОЧНИК',
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
 
-            // ================= ВКЛАДКА 3: О программе =================
+            // ВКЛАДКА 3: Питание персонала (С УМНЫМ КАЛЕНДАРЕМ И ЦВЕТАМИ)
+            SingleChildScrollView(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                children: [
+                  _buildScheduleMonthCard(currentMonth),
+                  const SizedBox(height: 16),
+                  _buildScheduleMonthCard(nextMonth),
+                ],
+              ),
+            ),
+
+            // ВКЛАДКА 4: О программе
             SingleChildScrollView(
               padding: const EdgeInsets.all(16.0),
               child: Card(
@@ -1181,7 +1576,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                       const SizedBox(height: 4),
                       const Text(
-                        'Версия 1.0.0',
+                        'Версия 1.1.0 (Оффлайн-режим)',
                         style: TextStyle(
                           fontSize: 14,
                           color: Colors.grey,
@@ -1219,12 +1614,12 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                       ListTile(
                         leading: const Icon(
-                          Icons.check_circle_outline,
-                          color: Colors.green,
+                          Icons.wifi_off,
+                          color: Colors.orange,
                         ),
-                        title: const Text('Назначение'),
+                        title: const Text('Автономность'),
                         subtitle: const Text(
-                          'Учет списаний, приходов и перемещений ингредиентов.',
+                          'Поддержка работы без интернета с автосинхронизацией.',
                         ),
                       ),
                     ],
