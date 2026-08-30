@@ -93,6 +93,7 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isAddingIngredient = false;
   bool _isLoadingDirectory = true;
   bool _isSyncing = false;
+  bool _isOpeningSheet = false;
 
   final List<RecentEntry> _recentHistory = [];
   final List<RecentEntry> _offlineQueue = [];
@@ -246,6 +247,56 @@ class _HomeScreenState extends State<HomeScreen> {
             duration: const Duration(seconds: 2),
           ),
         );
+      }
+    }
+  }
+
+  // ==========================================
+  // ОТКРЫТИЕ ПРЯМОЙ ССЫЛКИ НА ТАБЛИЦУ ТЕКУЩЕГО МЕСЯЦА ЧЕРЕЗ СЕРВЕР
+  // ==========================================
+  Future<void> _openCurrentMonthSheet() async {
+    setState(() {
+      _isOpeningSheet = true;
+    });
+
+    try {
+      final response = await http
+          .get(Uri.parse('$_webAppUrl?action=get_sheet_url'))
+          .timeout(const Duration(seconds: 10));
+
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        final String sheetUrl = data['url'] ?? '';
+
+        if (sheetUrl.isNotEmpty) {
+          final Uri url = Uri.parse(sheetUrl);
+          bool launched = await launchUrl(
+            url,
+            mode: LaunchMode.platformDefault,
+          );
+          if (!launched) {
+            await launchUrl(url, mode: LaunchMode.externalApplication);
+          }
+        } else {
+          throw Exception('Пустая ссылка от сервера');
+        }
+      } else {
+        throw Exception('Ошибка сервера: ${response.statusCode}');
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(
+            content: Text('❌ Не удалось открыть таблицу текущего месяца'),
+            backgroundColor: Colors.red,
+          ),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isOpeningSheet = false;
+        });
       }
     }
   }
@@ -421,7 +472,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               flex: 3,
                               child: TextField(
                                 controller: item.countController,
-                                keyboardType: TextInputType.number,
+                                keyboardType: TextInputType.text,
                                 decoration: const InputDecoration(
                                   labelText: 'Кол-во (шт)',
                                   border: OutlineInputBorder(),
@@ -435,7 +486,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               flex: 3,
                               child: TextField(
                                 controller: item.weightController,
-                                keyboardType: TextInputType.number,
+                                keyboardType: TextInputType.text,
                                 decoration: const InputDecoration(
                                   labelText: 'Вес 1 шт (кг)',
                                   border: OutlineInputBorder(),
@@ -450,7 +501,7 @@ class _HomeScreenState extends State<HomeScreen> {
                                 flex: 3,
                                 child: TextField(
                                   controller: item.priceController,
-                                  keyboardType: TextInputType.number,
+                                  keyboardType: TextInputType.text,
                                   decoration: const InputDecoration(
                                     labelText: 'Цена 1 шт (₽)',
                                     border: OutlineInputBorder(),
@@ -761,11 +812,11 @@ class _HomeScreenState extends State<HomeScreen> {
       case 'Денис':
         return Colors.orange;
       case 'Данил':
-        return Colors.green.shade800; // Темно-зеленый
+        return Colors.green.shade800;
       case 'Газиз':
         return Colors.black;
       case 'Гена':
-        return Colors.blue.shade900; // Темно-синий
+        return Colors.blue.shade900;
       default:
         return Colors.black87;
     }
@@ -794,28 +845,25 @@ class _HomeScreenState extends State<HomeScreen> {
     ];
     String monthTitle = '${monthNames[monthDate.month]} ${monthDate.year}';
 
-    // Якорь — 1 августа 2026. Именно отсюда отсчитывается 12-дневный цикл
     final DateTime anchor = DateTime.utc(2026, 8, 1);
 
-    // Цикл дежурств (2 через 2, повторяется каждые 12 дней для имен)
     final List<Map<String, String?>> cycle = [
-      {'alexei': null, 'denis': 'Денис'}, // Индекс 0 (1 авг)
-      {'alexei': null, 'denis': 'Газиз'}, // Индекс 1
-      {'alexei': 'Данил', 'denis': null}, // Индекс 2 (3 авг)
-      {'alexei': 'Денис', 'denis': null}, // Индекс 3
-      {'alexei': null, 'denis': 'Гена'}, // Индекс 4
-      {'alexei': null, 'denis': 'Газиз'}, // Индекс 5
-      {'alexei': 'Данил', 'denis': null}, // Индекс 6
-      {'alexei': 'Алексей', 'denis': null}, // Индекс 7
-      {'alexei': null, 'denis': 'Гена'}, // Индекс 8
-      {'alexei': null, 'denis': 'Денис'}, // Индекс 9
-      {'alexei': 'Алексей', 'denis': null}, // Индекс 10
-      {'alexei': 'Денис', 'denis': null}, // Индекс 11
+      {'alexei': null, 'denis': 'Денис'},
+      {'alexei': null, 'denis': 'Газиз'},
+      {'alexei': 'Данил', 'denis': null},
+      {'alexei': 'Денис', 'denis': null},
+      {'alexei': null, 'denis': 'Гена'},
+      {'alexei': null, 'denis': 'Газиз'},
+      {'alexei': 'Данил', 'denis': null},
+      {'alexei': 'Алексей', 'denis': null},
+      {'alexei': null, 'denis': 'Гена'},
+      {'alexei': null, 'denis': 'Денис'},
+      {'alexei': 'Алексей', 'denis': null},
+      {'alexei': 'Денис', 'denis': null},
     ];
 
     List<Widget> rows = [];
 
-    // Шапка таблицы
     rows.add(
       Padding(
         padding: const EdgeInsets.only(bottom: 8.0),
@@ -861,12 +909,11 @@ class _HomeScreenState extends State<HomeScreen> {
     );
     rows.add(const Divider(height: 1, thickness: 1));
 
-    // Заполнение дней месяца
     for (int i = 1; i <= daysInMonth; i++) {
       DateTime currentDay = DateTime.utc(monthDate.year, monthDate.month, i);
       int difference = currentDay.difference(anchor).inDays;
       int cycleIndex = difference % 12;
-      if (cycleIndex < 0) cycleIndex += 12; // Защита от прошлых дат
+      if (cycleIndex < 0) cycleIndex += 12;
 
       var shift = cycle[cycleIndex];
       bool isWeekend = currentDay.weekday == 6 || currentDay.weekday == 7;
@@ -884,9 +931,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   style: TextStyle(
                     fontSize: 16,
                     fontWeight: FontWeight.bold,
-                    color: isWeekend
-                        ? Colors.red.shade400
-                        : Colors.deepOrange, // Выходные красным
+                    color: isWeekend ? Colors.red.shade400 : Colors.deepOrange,
                   ),
                   textAlign: TextAlign.center,
                 ),
@@ -947,11 +992,9 @@ class _HomeScreenState extends State<HomeScreen> {
       ),
     );
   }
-  // ===================================================================
 
   @override
   Widget build(BuildContext context) {
-    // Получаем текущую дату для графика
     DateTime now = DateTime.now();
     DateTime currentMonth = DateTime(now.year, now.month, 1);
     DateTime nextMonth = DateTime(now.year, now.month + 1, 1);
@@ -1171,7 +1214,7 @@ class _HomeScreenState extends State<HomeScreen> {
                               Expanded(
                                 child: TextField(
                                   controller: _amountController,
-                                  keyboardType: TextInputType.number,
+                                  keyboardType: TextInputType.text,
                                   onChanged: (_) {
                                     _autoCalculateTotalIfLavash();
                                     setState(() {});
@@ -1257,7 +1300,7 @@ class _HomeScreenState extends State<HomeScreen> {
                             const SizedBox(height: 12),
                             TextField(
                               controller: _totalSumController,
-                              keyboardType: TextInputType.number,
+                              keyboardType: TextInputType.text,
                               onChanged: (_) => setState(() {}),
                               decoration: const InputDecoration(
                                 labelText: 'Общая сумма из накладной (₽) *',
@@ -1374,13 +1417,12 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
 
-            // ВКЛАДКА 2: Добавить ингредиент (со ссылкой на таблицу месяца)
+            // ВКЛАДКА 2: Добавить ингредиент
             SingleChildScrollView(
               padding: const EdgeInsets.all(16.0),
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  // --- ОКОШКО С ССЫЛКОЙ НА ГУГЛ ТАБЛИЦУ ТЕКУЩЕГО МЕСЯЦА ---
                   Card(
                     elevation: 2,
                     shape: RoundedRectangleBorder(
@@ -1424,38 +1466,24 @@ class _HomeScreenState extends State<HomeScreen> {
                               foregroundColor: Colors.white,
                               padding: const EdgeInsets.symmetric(vertical: 12),
                             ),
-                            onPressed: () async {
-                              final Uri sheetUri = Uri.parse(
-                                'https://docs.google.com/spreadsheets/d/1BBdDtZGnEitK8_Wu8njsLry0d3eq6QSVn87D1vjePqM/edit',
-                              );
-                              try {
-                                bool launched = await launchUrl(
-                                  sheetUri,
-                                  mode: LaunchMode.externalApplication,
-                                );
-                                if (!launched) {
-                                  await launchUrl(
-                                    sheetUri,
-                                    mode: LaunchMode.platformDefault,
-                                  );
-                                }
-                              } catch (e) {
-                                if (context.mounted) {
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    SnackBar(
-                                      content: Text(
-                                        'Не удалось открыть ссылку: $e',
-                                      ),
-                                      backgroundColor: Colors.red,
+                            onPressed: _isOpeningSheet
+                                ? null
+                                : _openCurrentMonthSheet,
+                            icon: _isOpeningSheet
+                                ? const SizedBox(
+                                    width: 18,
+                                    height: 18,
+                                    child: CircularProgressIndicator(
+                                      color: Colors.white,
+                                      strokeWidth: 2,
                                     ),
-                                  );
-                                }
-                              }
-                            },
-                            icon: const Icon(Icons.open_in_new, size: 18),
-                            label: const Text(
-                              'ОТКРЫТЬ ТАБЛИЦУ ТЕКУЩЕГО МЕСЯЦА',
-                              style: TextStyle(
+                                  )
+                                : const Icon(Icons.open_in_new, size: 18),
+                            label: Text(
+                              _isOpeningSheet
+                                  ? 'ЗАГРУЗКА...'
+                                  : 'ОТКРЫТЬ ТАБЛИЦУ МЕСЯЦА',
+                              style: const TextStyle(
                                 fontWeight: FontWeight.bold,
                                 fontSize: 13,
                               ),
@@ -1466,8 +1494,6 @@ class _HomeScreenState extends State<HomeScreen> {
                     ),
                   ),
                   const SizedBox(height: 16),
-                  // ----------------------------------------------------
-
                   Card(
                     elevation: 2,
                     shape: RoundedRectangleBorder(
@@ -1529,7 +1555,7 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
 
-            // ВКЛАДКА 3: Питание персонала (С УМНЫМ КАЛЕНДАРЕМ И ЦВЕТАМИ)
+            // ВКЛАДКА 3: Питание персонала
             SingleChildScrollView(
               padding: const EdgeInsets.all(16.0),
               child: Column(
