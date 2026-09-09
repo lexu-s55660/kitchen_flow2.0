@@ -34,6 +34,7 @@ class RecentEntry {
   final String ingredient;
   final String amount;
   final String total;
+  final List<String> dates;
 
   RecentEntry({
     required this.document,
@@ -41,6 +42,7 @@ class RecentEntry {
     required this.ingredient,
     required this.amount,
     required this.total,
+    required this.dates,
   });
 
   Map<String, dynamic> toJson() => {
@@ -49,6 +51,7 @@ class RecentEntry {
     'ingredient': ingredient,
     'amount': amount,
     'total': total,
+    'dates': dates,
   };
 
   factory RecentEntry.fromJson(Map<String, dynamic> json) => RecentEntry(
@@ -57,6 +60,7 @@ class RecentEntry {
     ingredient: json['ingredient'] ?? '',
     amount: json['amount'] ?? '',
     total: json['total'] ?? '',
+    dates: List<String>.from(json['dates'] ?? []),
   );
 }
 
@@ -94,6 +98,9 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isLoadingDirectory = true;
   bool _isSyncing = false;
   bool _isOpeningSheet = false;
+
+  final Set<int> _selectedDays = {DateTime.now().day};
+  final DateTime _currentDate = DateTime.now();
 
   final List<RecentEntry> _recentHistory = [];
   final List<RecentEntry> _offlineQueue = [];
@@ -214,6 +221,7 @@ class _HomeScreenState extends State<HomeScreen> {
           'amount': entry.amount,
           'unit': '',
           'total': entry.total,
+          'dates': entry.dates,
         });
 
         final response = await http
@@ -251,37 +259,27 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // ==========================================
-  // ОТКРЫТИЕ ПРЯМОЙ ССЫЛКИ НА ТАБЛИЦУ ТЕКУЩЕГО МЕСЯЦА ЧЕРЕЗ СЕРВЕР
-  // ==========================================
   Future<void> _openCurrentMonthSheet() async {
     setState(() {
       _isOpeningSheet = true;
     });
 
     try {
-      final response = await http
-          .get(Uri.parse('$_webAppUrl?action=get_sheet_url'))
-          .timeout(const Duration(seconds: 10));
+      final now = DateTime.now();
+      final monthStr = now.month.toString().padLeft(2, '0');
+      final fileName = 'KitchenFlow Учет 1.$monthStr.${now.year}';
 
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        final String sheetUrl = data['url'] ?? '';
+      final encodedQuery = Uri.encodeComponent(fileName);
+      final Uri searchUri = Uri.parse(
+        'https://drive.google.com/drive/search?q=$encodedQuery',
+      );
 
-        if (sheetUrl.isNotEmpty) {
-          final Uri url = Uri.parse(sheetUrl);
-          bool launched = await launchUrl(
-            url,
-            mode: LaunchMode.platformDefault,
-          );
-          if (!launched) {
-            await launchUrl(url, mode: LaunchMode.externalApplication);
-          }
-        } else {
-          throw Exception('Пустая ссылка от сервера');
-        }
-      } else {
-        throw Exception('Ошибка сервера: ${response.statusCode}');
+      bool launched = await launchUrl(
+        searchUri,
+        mode: LaunchMode.platformDefault,
+      );
+      if (!launched) {
+        await launchUrl(searchUri, mode: LaunchMode.externalApplication);
       }
     } catch (e) {
       if (mounted) {
@@ -695,9 +693,30 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
+    if (_selectedDocument == 'Списание персонала' && _selectedDays.isEmpty) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(
+          content: Text('Выберите дату списания в календаре!'),
+          backgroundColor: Colors.red,
+        ),
+      );
+      return;
+    }
+
     setState(() {
       _isLoading = true;
     });
+
+    List<String> datesToSend = [];
+    if (_selectedDocument == 'Списание персонала') {
+      datesToSend = _selectedDays.map((day) {
+        return '${day.toString().padLeft(2, '0')}.${_currentDate.month.toString().padLeft(2, '0')}.${_currentDate.year}';
+      }).toList();
+    } else {
+      datesToSend = [
+        '${_currentDate.day.toString().padLeft(2, '0')}.${_currentDate.month.toString().padLeft(2, '0')}.${_currentDate.year}',
+      ];
+    }
 
     final newEntry = RecentEntry(
       document: _selectedDocument!,
@@ -705,6 +724,7 @@ class _HomeScreenState extends State<HomeScreen> {
       ingredient: ingredientText,
       amount: amountText,
       total: _isSumRequired ? totalSumText : '',
+      dates: datesToSend,
     );
 
     try {
@@ -715,6 +735,7 @@ class _HomeScreenState extends State<HomeScreen> {
         'amount': newEntry.amount,
         'unit': '',
         'total': newEntry.total,
+        'dates': newEntry.dates,
       });
       final response = await http
           .post(
@@ -803,7 +824,6 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  // ================= АВТОМАТИЧЕСКАЯ ГЕНЕРАЦИЯ ГРАФИКА =================
   Color _getChefColor(String? name) {
     if (name == null) return Colors.grey.shade300;
     switch (name) {
@@ -1024,7 +1044,6 @@ class _HomeScreenState extends State<HomeScreen> {
         ),
         body: TabBarView(
           children: [
-            // ВКЛАДКА 1: Ввод данных
             SingleChildScrollView(
               padding: const EdgeInsets.all(16.0),
               child: Column(
@@ -1347,6 +1366,92 @@ class _HomeScreenState extends State<HomeScreen> {
                               ),
                             ),
                           ),
+
+                          // КАЛЕНДАРЬ ПОКАЗЫВАЕТСЯ ТОЛЬКО ПРИ ВЫБОРЕ "СПИСАНИЕ ПЕРСОНАЛА"
+                          if (_selectedDocument == 'Списание персонала') ...[
+                            const SizedBox(height: 24),
+                            Text(
+                              'Дни списания (Осень ${_currentDate.year}):',
+                              style: const TextStyle(
+                                fontWeight: FontWeight.bold,
+                                color: Colors.black87,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                            const SizedBox(height: 12),
+                            Center(
+                              child: ConstrainedBox(
+                                constraints: const BoxConstraints(
+                                  maxWidth: 350,
+                                ),
+                                child: GridView.builder(
+                                  shrinkWrap: true,
+                                  physics: const NeverScrollableScrollPhysics(),
+                                  gridDelegate:
+                                      const SliverGridDelegateWithFixedCrossAxisCount(
+                                        crossAxisCount: 7,
+                                        mainAxisSpacing: 8,
+                                        crossAxisSpacing: 8,
+                                        childAspectRatio: 1.0,
+                                      ),
+                                  itemCount: DateUtils.getDaysInMonth(
+                                    _currentDate.year,
+                                    _currentDate.month,
+                                  ),
+                                  itemBuilder: (context, index) {
+                                    int day = index + 1;
+                                    bool isSelected = _selectedDays.contains(
+                                      day,
+                                    );
+
+                                    return GestureDetector(
+                                      onTap: () {
+                                        setState(() {
+                                          if (isSelected &&
+                                              _selectedDays.length > 1) {
+                                            _selectedDays.remove(day);
+                                          } else if (!isSelected) {
+                                            _selectedDays.add(day);
+                                          }
+                                        });
+                                      },
+                                      child: AnimatedContainer(
+                                        duration: const Duration(
+                                          milliseconds: 200,
+                                        ),
+                                        decoration: BoxDecoration(
+                                          color: isSelected
+                                              ? Colors.deepOrange
+                                              : Colors.white,
+                                          borderRadius: BorderRadius.circular(
+                                            8,
+                                          ),
+                                          border: Border.all(
+                                            color: isSelected
+                                                ? Colors.deepOrange
+                                                : Colors.grey.shade300,
+                                          ),
+                                        ),
+                                        alignment: Alignment.center,
+                                        child: Text(
+                                          day.toString(),
+                                          style: TextStyle(
+                                            color: isSelected
+                                                ? Colors.white
+                                                : Colors.black87,
+                                            fontWeight: isSelected
+                                                ? FontWeight.bold
+                                                : FontWeight.normal,
+                                            fontSize: 16,
+                                          ),
+                                        ),
+                                      ),
+                                    );
+                                  },
+                                ),
+                              ),
+                            ),
+                          ],
                         ],
                       ),
                     ),
@@ -1417,7 +1522,6 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
 
-            // ВКЛАДКА 2: Добавить ингредиент
             SingleChildScrollView(
               padding: const EdgeInsets.all(16.0),
               child: Column(
@@ -1555,7 +1659,6 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
 
-            // ВКЛАДКА 3: Питание персонала
             SingleChildScrollView(
               padding: const EdgeInsets.all(16.0),
               child: Column(
@@ -1567,7 +1670,6 @@ class _HomeScreenState extends State<HomeScreen> {
               ),
             ),
 
-            // ВКЛАДКА 4: О программе
             SingleChildScrollView(
               padding: const EdgeInsets.all(16.0),
               child: Card(
