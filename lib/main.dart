@@ -5,7 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:url_launcher/url_launcher.dart';
 
 const String _webAppUrl =
-    'https://script.google.com/macros/s/AKfycbx_wOa6I1STNOAypOmRWsOQo8RziiAQYDizVFC-csMUW1JDwCh-Eg1tpFxpSB5iB5ob/exec';
+    'https://script.google.com/macros/s/AKfycbzckgYZ43WMDpfIx1Sl_uZ6QbMxe9C-6vuo9NBKbsMLshgHTwTdzdt-Y8WKRji-tECQ/exec';
 
 void main() {
   runApp(const KitchenFlowApp());
@@ -34,7 +34,6 @@ class RecentEntry {
   final String ingredient;
   final String amount;
   final String total;
-  final List<String> dates;
 
   RecentEntry({
     required this.document,
@@ -42,7 +41,6 @@ class RecentEntry {
     required this.ingredient,
     required this.amount,
     required this.total,
-    required this.dates,
   });
 
   Map<String, dynamic> toJson() => {
@@ -51,7 +49,6 @@ class RecentEntry {
     'ingredient': ingredient,
     'amount': amount,
     'total': total,
-    'dates': dates,
   };
 
   factory RecentEntry.fromJson(Map<String, dynamic> json) => RecentEntry(
@@ -60,7 +57,6 @@ class RecentEntry {
     ingredient: json['ingredient'] ?? '',
     amount: json['amount'] ?? '',
     total: json['total'] ?? '',
-    dates: List<String>.from(json['dates'] ?? []),
   );
 }
 
@@ -96,20 +92,18 @@ class _HomeScreenState extends State<HomeScreen> {
   bool _isLoading = false;
   bool _isAddingIngredient = false;
   bool _isLoadingDirectory = true;
-  bool _isSyncing = false;
   bool _isOpeningSheet = false;
 
-  final Set<int> _selectedDays = {DateTime.now().day};
-  final DateTime _currentDate = DateTime.now();
+  // Переменные для защиты от дубликатов
+  String? _lastAttemptHash;
+  String? _lastTransactionId;
 
   final List<RecentEntry> _recentHistory = [];
-  final List<RecentEntry> _offlineQueue = [];
   List<String> _directoryList = [];
 
   final List<String> _documents = [
     'Накладная базар',
     'Накладная метро',
-    'Списание персонала',
     'Порча',
     'Независимое списание',
     'Перемещение в заведения',
@@ -167,7 +161,7 @@ class _HomeScreenState extends State<HomeScreen> {
   @override
   void initState() {
     super.initState();
-    _loadOfflineData();
+    _loadCachedDirectory();
     _fetchDirectory();
   }
 
@@ -179,83 +173,14 @@ class _HomeScreenState extends State<HomeScreen> {
     super.dispose();
   }
 
-  Future<void> _loadOfflineData() async {
+  Future<void> _loadCachedDirectory() async {
     final prefs = await SharedPreferences.getInstance();
-    final queueRaw = prefs.getStringList('offline_queue') ?? [];
     final dirRaw = prefs.getStringList('cached_directory') ?? [];
-
-    setState(() {
-      _offlineQueue.clear();
-      for (var item in queueRaw) {
-        _offlineQueue.add(RecentEntry.fromJson(jsonDecode(item)));
-      }
-      if (dirRaw.isNotEmpty && _directoryList.isEmpty) {
+    if (dirRaw.isNotEmpty && _directoryList.isEmpty) {
+      setState(() {
         _directoryList = dirRaw;
         _isLoadingDirectory = false;
-      }
-    });
-
-    if (_offlineQueue.isNotEmpty) {
-      _syncOfflineQueue();
-    }
-  }
-
-  Future<void> _saveOfflineQueue() async {
-    final prefs = await SharedPreferences.getInstance();
-    final rawList = _offlineQueue.map((e) => jsonEncode(e.toJson())).toList();
-    await prefs.setStringList('offline_queue', rawList);
-  }
-
-  Future<void> _syncOfflineQueue() async {
-    if (_offlineQueue.isEmpty || _isSyncing) return;
-    setState(() => _isSyncing = true);
-    final List<RecentEntry> queueToProcess = List.from(_offlineQueue);
-    int successCount = 0;
-
-    for (var entry in queueToProcess) {
-      try {
-        final payload = jsonEncode({
-          'document': entry.document,
-          'recipient': entry.recipient,
-          'ingredient': entry.ingredient,
-          'amount': entry.amount,
-          'unit': '',
-          'total': entry.total,
-          'dates': entry.dates,
-        });
-
-        final response = await http
-            .post(
-              Uri.parse(_webAppUrl),
-              headers: {'Content-Type': 'text/plain;charset=utf-8'},
-              body: payload,
-            )
-            .timeout(const Duration(seconds: 10));
-
-        if (response.statusCode < 400) {
-          _offlineQueue.remove(entry);
-          successCount++;
-        }
-      } catch (e) {
-        break;
-      }
-    }
-
-    await _saveOfflineQueue();
-
-    if (mounted) {
-      setState(() {
-        _isSyncing = false;
       });
-      if (successCount > 0) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('✅ Синхронизировано записей: $successCount'),
-            backgroundColor: Colors.green,
-            duration: const Duration(seconds: 2),
-          ),
-        );
-      }
     }
   }
 
@@ -323,12 +248,14 @@ class _HomeScreenState extends State<HomeScreen> {
 
         final Set<String> combined = {};
         for (var item in ingredients) {
-          if (item != null && item.toString().isNotEmpty)
+          if (item != null && item.toString().isNotEmpty) {
             combined.add(item.toString().trim());
+          }
         }
         for (var item in dishes) {
-          if (item != null && item.toString().isNotEmpty)
+          if (item != null && item.toString().isNotEmpty) {
             combined.add(item.toString().trim());
+          }
         }
 
         final list = combined.toList();
@@ -360,13 +287,16 @@ class _HomeScreenState extends State<HomeScreen> {
   bool get _isTransfer =>
       _selectedDocument == 'Перемещение в заведения' ||
       _selectedDocument == 'Перемещение Бар-Кухня/Кухня-Бар';
+
   List<String> get _currentRecipients {
-    if (_selectedDocument == 'Перемещение Бар-Кухня/Кухня-Бар')
+    if (_selectedDocument == 'Перемещение Бар-Кухня/Кухня-Бар') {
       return ['Бар', 'Кухня'];
-    if (_selectedDocument == 'Перемещение в заведения')
+    }
+    if (_selectedDocument == 'Перемещение в заведения') {
       return _recipients
           .where((item) => item != 'Бар' && item != 'Кухня')
           .toList();
+    }
     return _recipients;
   }
 
@@ -374,6 +304,7 @@ class _HomeScreenState extends State<HomeScreen> {
       _selectedDocument == 'Перемещение Бар-Кухня/Кухня-Бар'
       ? 'Кому (Бар-Кухня/Кухня-Бар) *'
       : 'Кому (Цех/Склад) *';
+
   bool get _isSumRequired =>
       _selectedDocument == 'Накладная базар' ||
       _selectedDocument == 'Накладная метро';
@@ -583,13 +514,15 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                       onPressed: () {
                         setState(() {
-                          if (totalWeight > 0)
+                          if (totalWeight > 0) {
                             _amountController.text = totalWeight
                                 .toStringAsFixed(3)
                                 .replaceAll(RegExp(r"([.]*0)(?!.*\d)"), "");
-                          if (_isSumRequired && totalPrice > 0)
+                          }
+                          if (_isSumRequired && totalPrice > 0) {
                             _totalSumController.text = totalPrice
                                 .toStringAsFixed(2);
+                          }
                           _autoCalculateTotalIfLavash();
                         });
                         Navigator.pop(ctx);
@@ -660,8 +593,10 @@ class _HomeScreenState extends State<HomeScreen> {
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('❌ Ошибка добавления (нет сети): $e'),
+        const SnackBar(
+          content: Text(
+            '❌ Ошибка связи. Проверьте интернет и попробуйте снова.',
+          ),
           backgroundColor: Colors.red,
         ),
       );
@@ -675,6 +610,8 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _sendData() async {
+    if (_isLoading) return;
+
     final ingredientText = _ingredientValue.trim();
     final amountText = _amountController.text.trim();
     final totalSumText = _totalSumController.text.trim();
@@ -693,29 +630,20 @@ class _HomeScreenState extends State<HomeScreen> {
       return;
     }
 
-    if (_selectedDocument == 'Списание персонала' && _selectedDays.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(
-          content: Text('Выберите дату списания в календаре!'),
-          backgroundColor: Colors.red,
-        ),
-      );
-      return;
-    }
-
     setState(() {
       _isLoading = true;
     });
 
-    List<String> datesToSend = [];
-    if (_selectedDocument == 'Списание персонала') {
-      datesToSend = _selectedDays.map((day) {
-        return '${day.toString().padLeft(2, '0')}.${_currentDate.month.toString().padLeft(2, '0')}.${_currentDate.year}';
-      }).toList();
+    // Защита от дубликатов: ключ создается заново только при изменении формы
+    String currentHash =
+        "$_selectedDocument|$_selectedRecipient|$ingredientText|$amountText|$totalSumText";
+    String txId;
+    if (currentHash == _lastAttemptHash && _lastTransactionId != null) {
+      txId = _lastTransactionId!;
     } else {
-      datesToSend = [
-        '${_currentDate.day.toString().padLeft(2, '0')}.${_currentDate.month.toString().padLeft(2, '0')}.${_currentDate.year}',
-      ];
+      txId = DateTime.now().millisecondsSinceEpoch.toString();
+      _lastAttemptHash = currentHash;
+      _lastTransactionId = txId;
     }
 
     final newEntry = RecentEntry(
@@ -724,7 +652,6 @@ class _HomeScreenState extends State<HomeScreen> {
       ingredient: ingredientText,
       amount: amountText,
       total: _isSumRequired ? totalSumText : '',
-      dates: datesToSend,
     );
 
     try {
@@ -735,8 +662,10 @@ class _HomeScreenState extends State<HomeScreen> {
         'amount': newEntry.amount,
         'unit': '',
         'total': newEntry.total,
-        'dates': newEntry.dates,
+        'transactionId': txId,
       });
+
+      // Быстрый таймаут - 6 секунд
       final response = await http
           .post(
             Uri.parse(_webAppUrl),
@@ -756,31 +685,31 @@ class _HomeScreenState extends State<HomeScreen> {
             duration: const Duration(seconds: 2),
           ),
         );
+        // Сбрасываем форму и ключи только при 100% успехе
+        _amountController.clear();
+        _totalSumController.clear();
+        _ingredientValue = '';
+        _ingredientController?.clear();
+        _lastAttemptHash = null;
+        _lastTransactionId = null;
       } else {
-        throw Exception('Server error: ${response.statusCode}');
+        throw Exception('Server error');
       }
     } catch (_) {
       if (!mounted) return;
-      _offlineQueue.add(newEntry);
-      _recentHistory.insert(0, newEntry);
-      await _saveOfflineQueue();
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
+        const SnackBar(
           content: Text(
-            '📦 Нет связи. Сохранено оффлайн: $ingredientText ($amountText)',
+            '❌ Нет связи! Данные НЕ отправлены. Нажмите «Отправить» еще раз.',
           ),
-          backgroundColor: Colors.orange.shade800,
-          duration: const Duration(seconds: 3),
+          backgroundColor: Colors.red,
+          duration: Duration(seconds: 4),
         ),
       );
     } finally {
       if (mounted) {
         setState(() {
           _isLoading = false;
-          _amountController.clear();
-          _totalSumController.clear();
-          _ingredientValue = '';
-          _ingredientController?.clear();
         });
       }
     }
@@ -799,20 +728,20 @@ class _HomeScreenState extends State<HomeScreen> {
         'amount': entry.amount,
         'total': entry.total,
       });
-      await http.post(
-        Uri.parse(_webAppUrl),
-        headers: {'Content-Type': 'text/plain;charset=utf-8'},
-        body: payload,
-      );
+      await http
+          .post(
+            Uri.parse(_webAppUrl),
+            headers: {'Content-Type': 'text/plain;charset=utf-8'},
+            body: payload,
+          )
+          .timeout(const Duration(seconds: 6));
     } catch (_) {
     } finally {
       if (mounted) {
         setState(() {
           _recentHistory.remove(entry);
-          _offlineQueue.remove(entry);
           _isLoading = false;
         });
-        _saveOfflineQueue();
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(
             content: Text('🗑️ Удалено: ${entry.ingredient}'),
@@ -1049,56 +978,6 @@ class _HomeScreenState extends State<HomeScreen> {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  if (_offlineQueue.isNotEmpty)
-                    Container(
-                      margin: const EdgeInsets.only(bottom: 12),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 14,
-                        vertical: 10,
-                      ),
-                      decoration: BoxDecoration(
-                        color: Colors.amber.shade100,
-                        borderRadius: BorderRadius.circular(10),
-                        border: Border.all(color: Colors.amber.shade600),
-                      ),
-                      child: Row(
-                        children: [
-                          Icon(
-                            Icons.cloud_off,
-                            color: Colors.amber.shade900,
-                            size: 24,
-                          ),
-                          const SizedBox(width: 10),
-                          Expanded(
-                            child: Text(
-                              'В памяти: ${_offlineQueue.length} несинхр. записей',
-                              style: TextStyle(
-                                color: Colors.amber.shade900,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 13,
-                              ),
-                            ),
-                          ),
-                          ElevatedButton(
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.amber.shade800,
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 6,
-                              ),
-                              minimumSize: Size.zero,
-                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                            ),
-                            onPressed: _isSyncing ? null : _syncOfflineQueue,
-                            child: Text(
-                              _isSyncing ? '...' : 'Отправить',
-                              style: const TextStyle(fontSize: 12),
-                            ),
-                          ),
-                        ],
-                      ),
-                    ),
                   Card(
                     elevation: 2,
                     shape: RoundedRectangleBorder(
@@ -1133,10 +1012,11 @@ class _HomeScreenState extends State<HomeScreen> {
                                 if (_isTransfer &&
                                     !_currentRecipients.contains(
                                       _selectedRecipient,
-                                    ))
+                                    )) {
                                   _selectedRecipient = null;
-                                else if (!_isTransfer)
+                                } else if (!_isTransfer) {
                                   _selectedRecipient = null;
+                                }
                               });
                             },
                           ),
@@ -1170,8 +1050,9 @@ class _HomeScreenState extends State<HomeScreen> {
                             optionsBuilder:
                                 (TextEditingValue textEditingValue) {
                                   final query = textEditingValue.text.trim();
-                                  if (query.isEmpty)
+                                  if (query.isEmpty) {
                                     return const Iterable<String>.empty();
+                                  }
                                   final ruQuery = _convertEnToRu(query);
                                   return _directoryList.where((String option) {
                                     final lowerOption = option.toLowerCase();
@@ -1366,92 +1247,6 @@ class _HomeScreenState extends State<HomeScreen> {
                               ),
                             ),
                           ),
-
-                          // КАЛЕНДАРЬ ПОКАЗЫВАЕТСЯ ТОЛЬКО ПРИ ВЫБОРЕ "СПИСАНИЕ ПЕРСОНАЛА"
-                          if (_selectedDocument == 'Списание персонала') ...[
-                            const SizedBox(height: 24),
-                            Text(
-                              'Дни списания (Осень ${_currentDate.year}):',
-                              style: const TextStyle(
-                                fontWeight: FontWeight.bold,
-                                color: Colors.black87,
-                              ),
-                              textAlign: TextAlign.center,
-                            ),
-                            const SizedBox(height: 12),
-                            Center(
-                              child: ConstrainedBox(
-                                constraints: const BoxConstraints(
-                                  maxWidth: 350,
-                                ),
-                                child: GridView.builder(
-                                  shrinkWrap: true,
-                                  physics: const NeverScrollableScrollPhysics(),
-                                  gridDelegate:
-                                      const SliverGridDelegateWithFixedCrossAxisCount(
-                                        crossAxisCount: 7,
-                                        mainAxisSpacing: 8,
-                                        crossAxisSpacing: 8,
-                                        childAspectRatio: 1.0,
-                                      ),
-                                  itemCount: DateUtils.getDaysInMonth(
-                                    _currentDate.year,
-                                    _currentDate.month,
-                                  ),
-                                  itemBuilder: (context, index) {
-                                    int day = index + 1;
-                                    bool isSelected = _selectedDays.contains(
-                                      day,
-                                    );
-
-                                    return GestureDetector(
-                                      onTap: () {
-                                        setState(() {
-                                          if (isSelected &&
-                                              _selectedDays.length > 1) {
-                                            _selectedDays.remove(day);
-                                          } else if (!isSelected) {
-                                            _selectedDays.add(day);
-                                          }
-                                        });
-                                      },
-                                      child: AnimatedContainer(
-                                        duration: const Duration(
-                                          milliseconds: 200,
-                                        ),
-                                        decoration: BoxDecoration(
-                                          color: isSelected
-                                              ? Colors.deepOrange
-                                              : Colors.white,
-                                          borderRadius: BorderRadius.circular(
-                                            8,
-                                          ),
-                                          border: Border.all(
-                                            color: isSelected
-                                                ? Colors.deepOrange
-                                                : Colors.grey.shade300,
-                                          ),
-                                        ),
-                                        alignment: Alignment.center,
-                                        child: Text(
-                                          day.toString(),
-                                          style: TextStyle(
-                                            color: isSelected
-                                                ? Colors.white
-                                                : Colors.black87,
-                                            fontWeight: isSelected
-                                                ? FontWeight.bold
-                                                : FontWeight.normal,
-                                            fontSize: 16,
-                                          ),
-                                        ),
-                                      ),
-                                    );
-                                  },
-                                ),
-                              ),
-                            ),
-                          ],
                         ],
                       ),
                     ),
@@ -1483,22 +1278,13 @@ class _HomeScreenState extends State<HomeScreen> {
                       itemCount: _recentHistory.length,
                       itemBuilder: (context, index) {
                         final entry = _recentHistory[index];
-                        final isOffline = _offlineQueue.contains(entry);
                         return Card(
                           margin: const EdgeInsets.only(bottom: 8),
                           child: ListTile(
-                            leading: isOffline
-                                ? const Tooltip(
-                                    message: 'Сохранено в памяти устройства',
-                                    child: Icon(
-                                      Icons.cloud_off,
-                                      color: Colors.orange,
-                                    ),
-                                  )
-                                : const Icon(
-                                    Icons.cloud_done,
-                                    color: Colors.green,
-                                  ),
+                            leading: const Icon(
+                              Icons.cloud_done,
+                              color: Colors.green,
+                            ),
                             title: Text(
                               entry.ingredient.toUpperCase(),
                               style: const TextStyle(
@@ -1704,7 +1490,7 @@ class _HomeScreenState extends State<HomeScreen> {
                       ),
                       const SizedBox(height: 4),
                       const Text(
-                        'Версия 1.1.0 (Оффлайн-режим)',
+                        'Версия 1.4.0 (Защита от дублей, быстрая отправка)',
                         style: TextStyle(
                           fontSize: 14,
                           color: Colors.grey,
@@ -1741,13 +1527,10 @@ class _HomeScreenState extends State<HomeScreen> {
                         ),
                       ),
                       ListTile(
-                        leading: const Icon(
-                          Icons.wifi_off,
-                          color: Colors.orange,
-                        ),
-                        title: const Text('Автономность'),
+                        leading: const Icon(Icons.shield, color: Colors.blue),
+                        title: const Text('Режим работы'),
                         subtitle: const Text(
-                          'Поддержка работы без интернета с автосинхронизацией.',
+                          'Защита от двойных нажатий включена.',
                         ),
                       ),
                     ],
