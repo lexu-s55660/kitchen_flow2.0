@@ -61,7 +61,9 @@ class RecentEntry {
 }
 
 class BatchItem {
-  final TextEditingController countController = TextEditingController();
+  final TextEditingController countController = TextEditingController(
+    text: '1',
+  );
   final TextEditingController weightController = TextEditingController();
   final TextEditingController priceController = TextEditingController();
 
