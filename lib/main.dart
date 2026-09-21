@@ -240,7 +240,7 @@ class _HomeScreenState extends State<HomeScreen> {
     try {
       final response = await http
           .get(Uri.parse(_webAppUrl))
-          .timeout(const Duration(seconds: 8));
+          .timeout(const Duration(seconds: 15));
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         final List<dynamic> ingredients = data['ingredients'] ?? [];
@@ -569,7 +569,7 @@ class _HomeScreenState extends State<HomeScreen> {
             headers: {'Content-Type': 'text/plain;charset=utf-8'},
             body: payload,
           )
-          .timeout(const Duration(seconds: 10));
+          .timeout(const Duration(seconds: 15));
 
       if (!mounted) return;
 
@@ -665,14 +665,14 @@ class _HomeScreenState extends State<HomeScreen> {
         'transactionId': txId,
       });
 
-      // Быстрый таймаут - 6 секунд
+      // Увеличенный таймаут до 15 секунд для медленного интернета
       final response = await http
           .post(
             Uri.parse(_webAppUrl),
             headers: {'Content-Type': 'text/plain;charset=utf-8'},
             body: payload,
           )
-          .timeout(const Duration(seconds: 6));
+          .timeout(const Duration(seconds: 15));
 
       if (!mounted) return;
 
@@ -734,7 +734,7 @@ class _HomeScreenState extends State<HomeScreen> {
             headers: {'Content-Type': 'text/plain;charset=utf-8'},
             body: payload,
           )
-          .timeout(const Duration(seconds: 6));
+          .timeout(const Duration(seconds: 15));
     } catch (_) {
     } finally {
       if (mounted) {
