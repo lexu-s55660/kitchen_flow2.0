@@ -319,10 +319,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _showBatchCalculator() {
-    final List<BatchItem> batches = [
-      BatchItem()..weightController.text = '1.0',
-      BatchItem()..weightController.text = '0.9',
-    ];
+    final List<BatchItem> batches = [BatchItem()];
 
     showModalBottomSheet(
       context: context,
