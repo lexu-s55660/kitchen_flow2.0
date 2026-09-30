@@ -1,8 +1,8 @@
 import 'dart:convert';
+import 'dart:html' as html; // Подключили нативный браузерный API
 import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:shared_preferences/shared_preferences.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 const String _webAppUrl =
     'https://script.google.com/macros/s/AKfycbzckgYZ43WMDpfIx1Sl_uZ6QbMxe9C-6vuo9NBKbsMLshgHTwTdzdt-Y8WKRji-tECQ/exec';
@@ -188,7 +188,8 @@ class _HomeScreenState extends State<HomeScreen> {
     }
   }
 
-  Future<void> _openCurrentMonthSheet() async {
+  // --- ИСПРАВЛЕНИЕ: НАТИВНОЕ ОТКРЫТИЕ ССЫЛКИ ---
+  void _openCurrentMonthSheet() {
     setState(() {
       _isOpeningSheet = true;
     });
@@ -199,17 +200,11 @@ class _HomeScreenState extends State<HomeScreen> {
       final fileName = 'KitchenFlow Учет 1.$monthStr.${now.year}';
 
       final encodedQuery = Uri.encodeComponent(fileName);
-      final Uri searchUri = Uri.parse(
-        'https://drive.google.com/drive/search?q=$encodedQuery',
-      );
+      final String searchUrl =
+          'https://drive.google.com/drive/search?q=$encodedQuery';
 
-      bool launched = await launchUrl(
-        searchUri,
-        mode: LaunchMode.platformDefault,
-      );
-      if (!launched) {
-        await launchUrl(searchUri, mode: LaunchMode.externalApplication);
-      }
+      // _self предотвращает блокировку всплывающих окон мобильным браузером
+      html.window.open(searchUrl, '_self');
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
